@@ -1,0 +1,6 @@
+.venv/
+models/
+__pycache__/
+.DS_Store
+# 由 autostart.sh 在本机编译生成
+LocalVoiceInput.app/
