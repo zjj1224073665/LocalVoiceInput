@@ -220,6 +220,24 @@ def main():
         db = 20 * np.log10(float(np.sqrt((x * x).mean())) + 1e-7)
         state["level"] = min(max((db + 55) / 40, 0.0), 1.0)
 
+    def pick_input_device():
+        """优先内置麦克风,避开 Zoom 虚拟声卡/聚合设备;找不到则用系统默认。"""
+        for i, d in enumerate(sd.query_devices()):
+            if d["max_input_channels"] > 0 and "MacBook" in d["name"]:
+                return i
+        return None
+
+    def open_stream():
+        # 设备插拔/切换后 PortAudio 的设备列表会过期,每次开流前刷新(此时没有打开的流)
+        sd._terminate()
+        sd._initialize()
+        stream = sd.InputStream(
+            samplerate=SAMPLE_RATE, channels=1, dtype="float32",
+            device=pick_input_device(), callback=on_audio,
+        )
+        stream.start()
+        return stream
+
     def on_press(key):
         if key != hotkey:
             return
@@ -227,10 +245,12 @@ def main():
             if state["stream"] is not None:
                 return
             frames.clear()
-            state["stream"] = sd.InputStream(
-                samplerate=SAMPLE_RATE, channels=1, dtype="float32", callback=on_audio
-            )
-            state["stream"].start()
+            try:
+                state["stream"] = open_stream()
+            except Exception as e:
+                state["stream"] = None
+                print(f"打开麦克风失败: {e}")
+                return
         AppHelper.callAfter(overlay.show_recording)
 
     def on_release(key):
