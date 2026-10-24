@@ -2,18 +2,18 @@
 
 macOS 上的本地离线语音输入:按住右 Option 说话,松开后文字自动粘贴到光标处。不联网、不用登录。
 
-- 识别模型:[Qwen3-ASR-0.6B](https://github.com/QwenLM/Qwen3-ASR)(int8),通过 [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) 在 CPU 上运行,中英混说、标点和专有名词都比较准,支持热词
+- 识别模型:[Qwen3-ASR-1.7B](https://github.com/QwenLM/Qwen3-ASR)(8bit),通过 [mlx-audio](https://github.com/Blaizzy/mlx-audio) 在 Apple 芯片 GPU 上运行,中文、英文、中英混说都比较准,支持热词
 - 录音时屏幕底部显示一个玻璃胶囊浮窗(macOS 26 用 Liquid Glass,旧系统回退到毛玻璃)
 - 可开机自启动,后台运行,菜单栏有麦克风图标
 
 ## 安装
 
-需要 macOS、`python3` 和 Xcode 命令行工具(`xcode-select --install`)。
+需要 Apple 芯片的 Mac、Python 3.10 以上和 Xcode 命令行工具(`xcode-select --install`)。
 
 ```bash
 git clone https://github.com/zjj1224073665/LocalVoiceInput.git
 cd LocalVoiceInput
-./setup.sh              # 建虚拟环境、装依赖、下载模型(约 900 MB)
+./setup.sh              # 建虚拟环境、装依赖、下载模型(约 2.3 GB)
 ./autostart.sh install  # 编译后台 App、设为开机自启动并立即启动
 ```
 

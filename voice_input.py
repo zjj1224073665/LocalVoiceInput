@@ -1,6 +1,6 @@
 """本地离线语音输入:按住热键说话,松开后把识别结果粘贴到光标处。
 
-模型: Qwen3-ASR-0.6B (sherpa-onnx),完全离线。
+模型: Qwen3-ASR-1.7B (MLX,在 Apple 芯片 GPU 上运行),完全离线。
 用法: 双击 start.command,或 .venv/bin/python voice_input.py
 测试: .venv/bin/python voice_input.py --file some.wav
 """
@@ -15,32 +15,23 @@ import wave
 from pathlib import Path
 
 import numpy as np
-import sherpa_onnx
 
 # ---------------- 配置 ----------------
 HOTKEY = "alt_r"          # 按住说话的键,pynput 的 Key 名: alt_r=右Option, cmd_r=右Command, f13 ...
-NUM_THREADS = 4
 MIN_SECONDS = 0.3         # 短于此时长视为误触
-CHUNK_SECONDS = 10        # 长录音按约这个长度在停顿处切段识别(段越短越稳)
 RESTORE_CLIPBOARD = True  # 粘贴后恢复原剪贴板(仅文本)
 # --------------------------------------
 
 BASE = Path(__file__).resolve().parent
-MODEL_DIR = BASE / "models" / "sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25"
+MODEL_DIR = BASE / "models" / "Qwen3-ASR-1.7B-8bit"
 REPLACE_FILE = BASE / "replace.txt"
 SAMPLE_RATE = 16000
 
 
-def load_recognizer(hotwords=()):
-    return sherpa_onnx.OfflineRecognizer.from_qwen3_asr(
-        conv_frontend=str(MODEL_DIR / "conv_frontend.onnx"),
-        encoder=str(MODEL_DIR / "encoder.int8.onnx"),
-        decoder=str(MODEL_DIR / "decoder.int8.onnx"),
-        tokenizer=str(MODEL_DIR / "tokenizer"),
-        num_threads=NUM_THREADS,
-        max_new_tokens=256,
-        hotwords=",".join(hotwords),
-    )
+def load_recognizer():
+    from mlx_audio.stt import load
+
+    return load(str(MODEL_DIR))
 
 
 def load_vocab():
@@ -66,60 +57,9 @@ def load_vocab():
     return hotwords, pairs
 
 
-class Recognizer:
-    """replace.txt 改动后,在下次识别前用新热词重新加载模型(约 1 秒)。"""
-
-    def __init__(self):
-        self.mtime = None
-        self.reload_if_changed()
-
-    def reload_if_changed(self):
-        mtime = REPLACE_FILE.stat().st_mtime if REPLACE_FILE.exists() else None
-        if mtime == self.mtime:
-            return
-        self.mtime = mtime
-        hotwords, self.replacements = load_vocab()
-        self.recognizer = load_recognizer(hotwords)
-        if hotwords:
-            print("热词:", ", ".join(hotwords))
-
-    def transcribe(self, samples):
-        self.reload_if_changed()
-        return transcribe(self.recognizer, samples, self.replacements)
-
-
-def split_at_pauses(samples):
-    """把长音频在最安静处切成约 CHUNK_SECONDS 的段,避免切在字中间。"""
-    chunk = CHUNK_SECONDS * SAMPLE_RATE
-    if len(samples) <= chunk * 1.3:
-        return [samples]
-    win = int(0.2 * SAMPLE_RATE)
-    pieces, start = [], 0
-    while len(samples) - start > chunk * 1.3:
-        lo, hi = start + int(chunk * 0.6), start + int(chunk * 1.3)
-        seg = samples[lo:hi]
-        n = len(seg) // win
-        energy = (seg[: n * win].reshape(n, win) ** 2).mean(axis=1)
-        cut = lo + int(energy.argmin()) * win + win // 2
-        pieces.append(samples[start:cut])
-        start = cut
-    pieces.append(samples[start:])
-    return pieces
-
-
-def transcribe(recognizer, samples, replacements=()):
-    texts = []
-    for piece in split_at_pauses(samples):
-        stream = recognizer.create_stream()
-        stream.accept_waveform(SAMPLE_RATE, piece)
-        recognizer.decode_stream(stream)
-        texts.append(stream.result.text.strip())
-    text = ""
-    for t in texts:
-        # 英文句子之间补空格,中文直接相连
-        if text and t and text[-1].isascii() and t[0].isascii():
-            text += " "
-        text += t
+def transcribe(recognizer, samples):
+    hotwords, replacements = load_vocab()
+    text = recognizer.generate(samples, hotwords=hotwords or None).text.strip()
     for src, dst in replacements:
         text = text.replace(src, dst)
     return text
@@ -194,12 +134,12 @@ def acquire_single_instance_lock():
 
 def main():
     print("加载模型中…")
-    recognizer = Recognizer()
+    recognizer = load_recognizer()
 
     if len(sys.argv) == 3 and sys.argv[1] == "--file":
         samples = read_wav(sys.argv[2])
         t0 = time.time()
-        text = recognizer.transcribe(samples)
+        text = transcribe(recognizer, samples)
         print(f"[{len(samples) / SAMPLE_RATE:.1f}s 音频, 用时 {time.time() - t0:.2f}s] {text}")
         return
 
@@ -307,7 +247,7 @@ def main():
                 continue
             t0 = time.time()
             try:
-                text = recognizer.transcribe(samples)
+                text = transcribe(recognizer, samples)
                 AppHelper.callAfter(overlay.hide)
                 if text:
                     paste_text(text, keyboard_ctl, Key)
