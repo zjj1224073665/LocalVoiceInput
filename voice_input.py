@@ -1,6 +1,6 @@
 """本地离线语音输入:按住热键说话,松开后把识别结果粘贴到光标处。
 
-模型: SenseVoice-Small (sherpa-onnx),完全离线。
+模型: Qwen3-ASR-0.6B (sherpa-onnx),完全离线。
 用法: 双击 start.command,或 .venv/bin/python voice_input.py
 测试: .venv/bin/python voice_input.py --file some.wav
 """
@@ -19,7 +19,6 @@ import sherpa_onnx
 
 # ---------------- 配置 ----------------
 HOTKEY = "alt_r"          # 按住说话的键,pynput 的 Key 名: alt_r=右Option, cmd_r=右Command, f13 ...
-LANGUAGE = "auto"         # auto / zh / en / ja / ko / yue
 NUM_THREADS = 4
 MIN_SECONDS = 0.3         # 短于此时长视为误触
 CHUNK_SECONDS = 10        # 长录音按约这个长度在停顿处切段识别(段越短越稳)
@@ -27,33 +26,66 @@ RESTORE_CLIPBOARD = True  # 粘贴后恢复原剪贴板(仅文本)
 # --------------------------------------
 
 BASE = Path(__file__).resolve().parent
-MODEL_DIR = BASE / "models" / "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17"
+MODEL_DIR = BASE / "models" / "sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25"
 REPLACE_FILE = BASE / "replace.txt"
 SAMPLE_RATE = 16000
 
 
-def load_recognizer():
-    return sherpa_onnx.OfflineRecognizer.from_sense_voice(
-        model=str(MODEL_DIR / "model.int8.onnx"),
-        tokens=str(MODEL_DIR / "tokens.txt"),
+def load_recognizer(hotwords=()):
+    return sherpa_onnx.OfflineRecognizer.from_qwen3_asr(
+        conv_frontend=str(MODEL_DIR / "conv_frontend.onnx"),
+        encoder=str(MODEL_DIR / "encoder.int8.onnx"),
+        decoder=str(MODEL_DIR / "decoder.int8.onnx"),
+        tokenizer=str(MODEL_DIR / "tokenizer"),
         num_threads=NUM_THREADS,
-        language=LANGUAGE,
-        use_itn=True,
+        max_new_tokens=256,
+        hotwords=",".join(hotwords),
     )
 
 
-def load_replacements():
-    """replace.txt 每行: 错误写法 => 正确写法"""
-    pairs = []
+def load_vocab():
+    """读 replace.txt,返回 (热词列表, 替换对列表)。
+
+    单独一行的词是热词;"错误写法 => 正确写法" 是替换,右边的正确写法也自动算热词。
+    """
+    hotwords, pairs = [], []
     if REPLACE_FILE.exists():
         for line in REPLACE_FILE.read_text(encoding="utf-8").splitlines():
             line = line.strip()
-            if not line or line.startswith("#") or "=>" not in line:
+            if not line or line.startswith("#"):
                 continue
-            src, dst = (s.strip() for s in line.split("=>", 1))
-            if src:
-                pairs.append((src, dst))
-    return pairs
+            if "=>" in line:
+                src, dst = (s.strip() for s in line.split("=>", 1))
+                if src:
+                    pairs.append((src, dst))
+                word = dst
+            else:
+                word = line
+            if word and word not in hotwords:
+                hotwords.append(word)
+    return hotwords, pairs
+
+
+class Recognizer:
+    """replace.txt 改动后,在下次识别前用新热词重新加载模型(约 1 秒)。"""
+
+    def __init__(self):
+        self.mtime = None
+        self.reload_if_changed()
+
+    def reload_if_changed(self):
+        mtime = REPLACE_FILE.stat().st_mtime if REPLACE_FILE.exists() else None
+        if mtime == self.mtime:
+            return
+        self.mtime = mtime
+        hotwords, self.replacements = load_vocab()
+        self.recognizer = load_recognizer(hotwords)
+        if hotwords:
+            print("热词:", ", ".join(hotwords))
+
+    def transcribe(self, samples):
+        self.reload_if_changed()
+        return transcribe(self.recognizer, samples, self.replacements)
 
 
 def split_at_pauses(samples):
@@ -162,12 +194,12 @@ def acquire_single_instance_lock():
 
 def main():
     print("加载模型中…")
-    recognizer = load_recognizer()
+    recognizer = Recognizer()
 
     if len(sys.argv) == 3 and sys.argv[1] == "--file":
         samples = read_wav(sys.argv[2])
         t0 = time.time()
-        text = transcribe(recognizer, samples, load_replacements())
+        text = recognizer.transcribe(samples)
         print(f"[{len(samples) / SAMPLE_RATE:.1f}s 音频, 用时 {time.time() - t0:.2f}s] {text}")
         return
 
@@ -275,7 +307,7 @@ def main():
                 continue
             t0 = time.time()
             try:
-                text = transcribe(recognizer, samples, load_replacements())
+                text = recognizer.transcribe(samples)
                 AppHelper.callAfter(overlay.hide)
                 if text:
                     paste_text(text, keyboard_ctl, Key)

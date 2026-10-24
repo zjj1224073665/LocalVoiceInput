@@ -2,7 +2,7 @@
 
 macOS 上的本地离线语音输入:按住右 Option 说话,松开后文字自动粘贴到光标处。不联网、不用登录。
 
-- 识别模型:[SenseVoice-Small](https://github.com/FunAudioLLM/SenseVoice),通过 [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) 在 CPU 上运行,支持中文、英语、粤语、日语、韩语
+- 识别模型:[Qwen3-ASR-0.6B](https://github.com/QwenLM/Qwen3-ASR)(int8),通过 [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) 在 CPU 上运行,中英混说、标点和专有名词都比较准,支持热词
 - 录音时屏幕底部显示一个玻璃胶囊浮窗(macOS 26 用 Liquid Glass,旧系统回退到毛玻璃)
 - 可开机自启动,后台运行,菜单栏有麦克风图标
 
@@ -13,7 +13,7 @@ macOS 上的本地离线语音输入:按住右 Option 说话,松开后文字自�
 ```bash
 git clone https://github.com/zjj1224073665/LocalVoiceInput.git
 cd LocalVoiceInput
-./setup.sh              # 建虚拟环境、装依赖、下载模型(约 160 MB)
+./setup.sh              # 建虚拟环境、装依赖、下载模型(约 900 MB)
 ./autostart.sh install  # 编译后台 App、设为开机自启动并立即启动
 ```
 
@@ -28,7 +28,7 @@ cd LocalVoiceInput
 | 想做什么 | 怎么做 |
 |---|---|
 | 换热键 | 改 `voice_input.py` 顶部的 `HOTKEY` |
-| 纠正老是认错的词 | 在 `replace.txt` 里加一行 `错误写法 => 正确写法`,保存即生效 |
+| 让专有名词认得更准 | 在 `replace.txt` 里加一行这个词(热词),或 `错误写法 => 正确写法`(强制替换),保存后下次说话生效 |
 | 调浮窗位置和大小 | 改 `overlay.py` 顶部的常量 |
 | 退出 | 菜单栏麦克风图标 → 退出语音输入 |
 | 取消自启动 | `./autostart.sh uninstall` |

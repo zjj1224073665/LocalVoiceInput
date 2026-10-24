@@ -208,7 +208,7 @@ class _MenuTarget(NSObject):
 
 
 class StatusMenu:
-    """菜单栏图标: 显示状态,提供编辑纠错表和退出。"""
+    """菜单栏图标: 显示状态,提供编辑热词表和退出。"""
 
     def __init__(self, base):
         self.target = _MenuTarget.alloc().init()
@@ -222,7 +222,7 @@ class StatusMenu:
         self.status = menu.addItemWithTitle_action_keyEquivalent_("", None, "")
         self.status.setEnabled_(False)
         menu.addItem_(NSMenuItem.separatorItem())
-        for title, action in (("编辑纠错表…", "openReplace:"), ("打开程序文件夹", "openFolder:")):
+        for title, action in (("编辑热词表…", "openReplace:"), ("打开程序文件夹", "openFolder:")):
             menu.addItemWithTitle_action_keyEquivalent_(title, action, "").setTarget_(self.target)
         menu.addItem_(NSMenuItem.separatorItem())
         menu.addItemWithTitle_action_keyEquivalent_("退出语音输入", "terminate:", "q")
