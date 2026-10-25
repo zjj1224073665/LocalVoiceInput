@@ -20,6 +20,7 @@ import numpy as np
 HOTKEY = "alt_r"          # 按住说话的键,pynput 的 Key 名: alt_r=右Option, cmd_r=右Command, f13 ...
 MIN_SECONDS = 0.3         # 短于此时长视为误触
 RESTORE_CLIPBOARD = True  # 粘贴后恢复原剪贴板(仅文本)
+STOP_TIMEOUT = 3          # 关闭麦克风超过这么多秒视为卡死,自动重启
 # --------------------------------------
 
 BASE = Path(__file__).resolve().parent
@@ -120,6 +121,11 @@ def missing_permissions(prompt=False):
     return missing
 
 
+def restart():
+    """原地重启本进程(仍挂在 App 外壳下,权限不变)。"""
+    os.execv(sys.executable, [sys.executable, "-u", str(BASE / "voice_input.py")])
+
+
 def acquire_single_instance_lock():
     import fcntl
 
@@ -157,7 +163,7 @@ def main():
     keyboard_ctl = keyboard.Controller()
     jobs = queue.Queue()
     frames = []
-    state = {"stream": None, "level": 0.0}
+    state = {"stream": None, "recording": False, "level": 0.0}
     lock = threading.Lock()
 
     # 浮窗必须在主线程创建和更新,其他线程通过 AppHelper.callAfter 调用
@@ -175,7 +181,7 @@ def main():
         def recheck(_t):
             if not missing_permissions():
                 print("权限已就绪,重启")
-                os.execv(sys.executable, [sys.executable, "-u", str(BASE / "voice_input.py")])
+                restart()
 
         NSTimer.scheduledTimerWithTimeInterval_repeats_block_(2.0, True, recheck)
     else:
@@ -214,7 +220,7 @@ def main():
         if key != hotkey:
             return
         with lock:
-            if state["stream"] is not None:
+            if state["stream"] is not None:   # 正在录音,或上一次的流还没关完
                 return
             frames.clear()
             try:
@@ -223,30 +229,49 @@ def main():
                 state["stream"] = None
                 print(f"打开麦克风失败: {e}")
                 return
+            state["recording"] = True
         AppHelper.callAfter(overlay.show_recording)
+
+    def close_stream(stream):
+        # PortAudio 在 macOS 上关流偶尔会和 CoreAudio 的 IO 线程互相死锁,
+        # 所以放到单独线程里关并限时;真卡死了就等手头的识别做完后重启进程自愈
+        def close():
+            stream.stop()
+            stream.close()
+
+        t = threading.Thread(target=close, daemon=True)
+        t.start()
+        t.join(STOP_TIMEOUT)
+        if t.is_alive():
+            print("关闭麦克风卡死,识别完成后自动重启")
+            jobs.join()
+            time.sleep(0.6)   # 等粘贴和剪贴板恢复落地
+            restart()
+        with lock:
+            state["stream"] = None
 
     def on_release(key):
         if key != hotkey:
             return
         with lock:
-            stream, state["stream"] = state["stream"], None
-            if stream is None:
+            if not state["recording"]:
                 return
-            stream.stop()
-            stream.close()
+            state["recording"] = False
+            stream = state["stream"]
             samples = np.concatenate(frames) if frames else np.zeros(0, dtype=np.float32)
         AppHelper.callAfter(overlay.show_transcribing)
         jobs.put(samples)
+        threading.Thread(target=close_stream, args=(stream,), daemon=True).start()
 
     def worker():
         while True:
             samples = jobs.get()
             seconds = len(samples) / SAMPLE_RATE
-            if seconds < MIN_SECONDS:
-                AppHelper.callAfter(overlay.hide)
-                continue
             t0 = time.time()
             try:
+                if seconds < MIN_SECONDS:
+                    AppHelper.callAfter(overlay.hide)
+                    continue
                 text = transcribe(recognizer, samples)
                 AppHelper.callAfter(overlay.hide)
                 if text:
@@ -255,6 +280,8 @@ def main():
             except Exception as e:
                 AppHelper.callAfter(overlay.hide)
                 print(f"识别出错: {e}")
+            finally:
+                jobs.task_done()
 
     threading.Thread(target=worker, daemon=True).start()
     print(f"就绪。按住 {HOTKEY}(右 Option)说话,松开后自动输入。从菜单栏麦克风图标或 Ctrl+C 退出。")
