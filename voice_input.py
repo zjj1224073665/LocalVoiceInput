@@ -32,7 +32,9 @@ SAMPLE_RATE = 16000
 def load_recognizer():
     from mlx_audio.stt import load
 
-    return load(str(MODEL_DIR))
+    model = load(str(MODEL_DIR))
+    model.generate(np.zeros(SAMPLE_RATE, dtype=np.float32))  # 预热 GPU,免得第一句话特别慢
+    return model
 
 
 def load_vocab():
