@@ -4,3 +4,24 @@
 # 例:
 # DolphinDB
 # 道芬DB => DolphinDB
+
+# 热词
+Claude
+Codex
+OpenCode
+Gemini
+MiniMax
+Playwright
+Simplify
+Workday
+LinkedIn
+OKX
+Hyperliquid
+Jetstar
+MDP
+
+# 强制替换
+Simplyfy => Simplify
+OKD X => OKX
+Cloud in Chrome => Claude in Chrome
+CodeX => Codex
