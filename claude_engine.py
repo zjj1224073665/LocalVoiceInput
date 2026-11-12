@@ -92,7 +92,8 @@ class ClaudeDictation:
             self.state = "stopped"
             self.fail_count = self.fail_count + 1 if time.time() - started < 60 else 1
             wait = min(5 * 2 ** (self.fail_count - 1), 300)
-            self.log(f"Claude 会话已退出,{wait}s 后重启。最后屏幕: {self.tail(300)}")
+            code = self.proc.returncode if self.proc else None
+            self.log(f"Claude 会话已退出(退出码 {code}),{wait}s 后重启。最后屏幕: {self.tail(300)}")
             time.sleep(wait)
 
     def _spawn(self):
