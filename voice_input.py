@@ -1,11 +1,12 @@
 """本地离线语音输入:按住热键说话,松开后把识别结果粘贴到光标处。
 
-模型: Qwen3-ASR-1.7B (MLX,在 Apple 芯片 GPU 上运行),完全离线。
+模型: Whisper large-v3-turbo (MLX,在 Apple 芯片 GPU 上运行),完全离线。
 用法: 双击 start.command,或 .venv/bin/python voice_input.py
 测试: .venv/bin/python voice_input.py --file some.wav
 """
 import os
 import queue
+import re
 import signal
 import subprocess
 import sys
@@ -21,10 +22,13 @@ HOTKEY = "alt_r"          # 按住说话的键,pynput 的 Key 名: alt_r=右Opti
 MIN_SECONDS = 0.3         # 短于此时长视为误触
 RESTORE_CLIPBOARD = True  # 粘贴后恢复原剪贴板(仅文本)
 STOP_TIMEOUT = 3          # 关闭麦克风超过这么多秒视为卡死,自动重启
+SILENCE_DB = -45          # 整段录音最响处低于此音量视为没说话(Whisper 遇到静音会胡编)
+# 给 Whisper 的提示语,引导输出简体中文和中文标点
+PROMPT = "以下是普通话的句子，使用简体中文。"
 # --------------------------------------
 
 BASE = Path(__file__).resolve().parent
-MODEL_DIR = BASE / "models" / "Qwen3-ASR-1.7B-8bit"
+MODEL_DIR = BASE / "models" / "whisper-large-v3-turbo"
 REPLACE_FILE = BASE / "replace.txt"
 SAMPLE_RATE = 16000
 
@@ -60,9 +64,41 @@ def load_vocab():
     return hotwords, pairs
 
 
+def is_silent(samples):
+    """按 50ms 一帧算音量,最响的一帧都低于 SILENCE_DB 就当没说话。"""
+    n = len(samples) // 800 * 800
+    if n == 0:
+        return True
+    rms = np.sqrt((samples[:n].reshape(-1, 800) ** 2).mean(axis=1))
+    return 20 * np.log10(float(rms.max()) + 1e-7) < SILENCE_DB
+
+
+CJK = r"[\u4e00-\u9fff]"
+FULLWIDTH = {",": "，", ".": "。", "?": "？", "!": "！", ":": "：", ";": "；"}
+
+
+def fix_punctuation(text):
+    """Whisper 在中文里常输出半角标点,紧挨汉字的换成全角。"""
+    return re.sub(
+        rf"(?<={CJK})\s*([,.?!:;])\s*|\s*([,.?!:;])\s*(?={CJK})",
+        lambda m: FULLWIDTH[m.group(1) or m.group(2)],
+        text,
+    )
+
+
 def transcribe(recognizer, samples):
+    if is_silent(samples):
+        return ""
     hotwords, replacements = load_vocab()
-    text = recognizer.generate(samples, hotwords=hotwords or None).text.strip()
+    result = recognizer.generate(
+        samples,
+        initial_prompt=PROMPT,
+        hotwords=hotwords or None,
+        temperature=0.0,
+        condition_on_previous_text=False,
+        return_timestamps=False,
+    )
+    text = fix_punctuation(result.text.strip())
     for src, dst in replacements:
         text = text.replace(src, dst)
     return text
