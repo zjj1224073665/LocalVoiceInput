@@ -1,7 +1,6 @@
-"""语音输入:按住热键说话,松开后把识别结果粘贴到光标处。
+"""本地离线语音输入:按住热键说话,松开后把识别结果粘贴到光标处。
 
-识别: 默认用 Claude Code 自带的语音听写(隐藏会话,见 claude_engine.py,只支持英文等语言);
-      Claude 出错时弹通知,并改用本地的 Qwen3-ASR-1.7B (MLX,离线) 识别同一段录音。
+模型: Qwen3-ASR-1.7B (MLX,在 Apple 芯片 GPU 上运行),完全离线。
 用法: 双击 start.command,或 .venv/bin/python voice_input.py
 测试: .venv/bin/python voice_input.py --file some.wav
 """
@@ -22,8 +21,6 @@ HOTKEY = "alt_r"          # 按住说话的键,pynput 的 Key 名: alt_r=右Opti
 MIN_SECONDS = 0.3         # 短于此时长视为误触
 RESTORE_CLIPBOARD = True  # 粘贴后恢复原剪贴板(仅文本)
 STOP_TIMEOUT = 3          # 关闭麦克风超过这么多秒视为卡死,自动重启
-ENGINE = "claude"         # "claude": Claude Code 听写,失败时用 Qwen 兜底; "qwen": 只用本地 Qwen
-SILENCE_DB = -50          # Claude 没听出字时,录音最响处高于此音量才交给 Qwen 再试
 # --------------------------------------
 
 BASE = Path(__file__).resolve().parent
@@ -63,35 +60,12 @@ def load_vocab():
     return hotwords, pairs
 
 
-def apply_replacements(text, replacements):
-    for src, dst in replacements:
-        text = text.replace(src, dst)
-    return text
-
-
 def transcribe(recognizer, samples):
     hotwords, replacements = load_vocab()
     text = recognizer.generate(samples, hotwords=hotwords or None).text.strip()
-    return apply_replacements(text, replacements)
-
-
-def has_voice(samples):
-    """按 50ms 一帧算音量,最响的一帧超过 SILENCE_DB 就认为有人说话。"""
-    n = len(samples) // 800 * 800
-    if n == 0:
-        return False
-    rms = np.sqrt((samples[:n].reshape(-1, 800) ** 2).mean(axis=1))
-    return 20 * np.log10(float(rms.max()) + 1e-7) > SILENCE_DB
-
-
-def notify(title, message):
-    """macOS 通知中心弹一条通知。"""
-    def esc(s):
-        return s.replace("\\", "\\\\").replace('"', '\\"')
-    subprocess.Popen(
-        ["osascript", "-e", f'display notification "{esc(message)}" with title "{esc(title)}"'],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+    for src, dst in replacements:
+        text = text.replace(src, dst)
+    return text
 
 
 def read_wav(path):
@@ -149,13 +123,8 @@ def missing_permissions(prompt=False):
     return missing
 
 
-CLAUDE = None   # ClaudeDictation 实例,ENGINE="claude" 时才有
-
-
 def restart():
     """原地重启本进程(仍挂在 App 外壳下,权限不变)。"""
-    if CLAUDE:
-        CLAUDE.stop()
     os.execv(sys.executable, [sys.executable, "-u", str(BASE / "voice_input.py")])
 
 
@@ -172,7 +141,6 @@ def acquire_single_instance_lock():
 
 
 def main():
-    global CLAUDE
     print("加载模型中…")
     recognizer = load_recognizer()
 
@@ -184,15 +152,6 @@ def main():
         return
 
     instance_lock = acquire_single_instance_lock()  # noqa: F841 进程存活期间一直持有
-
-    if ENGINE == "claude":
-        from claude_engine import ClaudeDictation
-
-        CLAUDE = ClaudeDictation(log=print)
-        CLAUDE.start()
-        import atexit
-
-        atexit.register(CLAUDE.stop)   # 菜单"退出"走 terminate:,靠 atexit 关掉隐藏会话
 
     import sounddevice as sd
     from AppKit import NSApplication, NSApplicationActivationPolicyAccessory, NSTimer
@@ -206,7 +165,7 @@ def main():
     keyboard_ctl = keyboard.Controller()
     jobs = queue.Queue()
     frames = []
-    state = {"stream": None, "recording": False, "level": 0.0, "claude": False, "claude_error": None}
+    state = {"stream": None, "recording": False, "level": 0.0}
     lock = threading.Lock()
 
     # 浮窗必须在主线程创建和更新,其他线程通过 AppHelper.callAfter 调用
@@ -228,7 +187,7 @@ def main():
 
         NSTimer.scheduledTimerWithTimeInterval_repeats_block_(2.0, True, recheck)
     else:
-        menu.set_status("按住右 Option 说话 · " + ("Claude 听写,Qwen 备用" if CLAUDE else "Qwen"))
+        menu.set_status("按住右 Option 说话")
         # 开一下麦克风,让首次运行时的麦克风授权框现在就弹出来
         threading.Thread(
             target=lambda: sd.rec(1600, samplerate=SAMPLE_RATE, channels=1, dtype="float32", blocking=True),
@@ -273,14 +232,6 @@ def main():
                 print(f"打开麦克风失败: {e}")
                 return
             state["recording"] = True
-            # 自己的录音照常进行,Claude 同时听;Claude 出错时用这段录音交给 Qwen
-            state["claude"], state["claude_error"] = False, None
-            if CLAUDE:
-                try:
-                    CLAUDE.begin()
-                    state["claude"] = True
-                except Exception as e:
-                    state["claude_error"] = str(e)
         AppHelper.callAfter(overlay.show_recording)
 
     def close_stream(stream):
@@ -310,49 +261,24 @@ def main():
             state["recording"] = False
             stream = state["stream"]
             samples = np.concatenate(frames) if frames else np.zeros(0, dtype=np.float32)
-            if state["claude"]:
-                CLAUDE.end()
-            job = (samples, state["claude"], state["claude_error"])
         AppHelper.callAfter(overlay.show_transcribing)
-        jobs.put(job)
+        jobs.put(samples)
         threading.Thread(target=close_stream, args=(stream,), daemon=True).start()
-
-    def recognize(samples, used_claude, claude_error):
-        """返回 (文字, 用的引擎)。Claude 出错时弹通知并改用 Qwen。"""
-        if used_claude:
-            try:
-                text = CLAUDE.collect()
-                if text:
-                    return apply_replacements(text, load_vocab()[1]), "Claude"
-                if not has_voice(samples):
-                    return "", "Claude"
-                claude_error = "Claude 没听出内容"
-            except Exception as e:
-                claude_error = str(e)
-        if claude_error:
-            print(f"Claude 听写失败,改用 Qwen: {claude_error}")
-            notify("Claude 听写失败,已改用 Qwen", claude_error)
-        return transcribe(recognizer, samples), "Qwen"
 
     def worker():
         while True:
-            samples, used_claude, claude_error = jobs.get()
+            samples = jobs.get()
             seconds = len(samples) / SAMPLE_RATE
             t0 = time.time()
             try:
                 if seconds < MIN_SECONDS:
-                    if used_claude:
-                        try:
-                            CLAUDE.collect()   # 误触: 取出并丢掉,清空 Claude 输入框
-                        except Exception:
-                            pass
                     AppHelper.callAfter(overlay.hide)
                     continue
-                text, engine = recognize(samples, used_claude, claude_error)
+                text = transcribe(recognizer, samples)
                 AppHelper.callAfter(overlay.hide)
                 if text:
                     paste_text(text, keyboard_ctl, Key)
-                print(f"[{engine} {seconds:.1f}s → {time.time() - t0:.2f}s] {text}")
+                print(f"[{seconds:.1f}s → {time.time() - t0:.2f}s] {text}")
             except Exception as e:
                 AppHelper.callAfter(overlay.hide)
                 print(f"识别出错: {e}")
@@ -365,13 +291,10 @@ def main():
 
     # Ctrl+C: 事件循环在原生代码里跑,靠一个空定时器让 Python 有机会处理信号
     def quit_now(*_):
-        if CLAUDE:
-            CLAUDE.stop()
         print("\n已退出")
         os._exit(0)
 
     signal.signal(signal.SIGINT, quit_now)
-    signal.signal(signal.SIGTERM, quit_now)
     NSTimer.scheduledTimerWithTimeInterval_repeats_block_(0.25, True, lambda _t: None)
     AppHelper.runEventLoop(installInterrupt=False)
 
